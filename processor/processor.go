@@ -22,36 +22,108 @@ func NewProcessor(llamaClient *llama.Client, bigipClient *bigip.Client) *Process
 }
 
 func (p *Processor) ProcessQuery(query string) (string, error) {
-	// First, get a completion from LLaMA
-	llamaPrompt := fmt.Sprintf("Given the following query about F5 BIG-IP infrastructure, determine if it requires querying the BIG-IP system for virtual server information. If it does, respond with 'QUERY_BIGIP'. If not, provide a general answer. Query: %s", query)
+	llamaPrompt := fmt.Sprintf("Given the following query about F5 BIG-IP infrastructure, determine if it requires querying the BIG-IP system for virtual server, pool, or pool member information. If it does, respond with 'QUERY_BIGIP_VS' for virtual servers, 'QUERY_BIGIP_POOL' for pools, or 'QUERY_BIGIP_POOL_MEMBERS' for pool members. If not, provide a general answer. Query: %s", query)
 	llamaResponse, err := p.llamaClient.GetCompletion(llamaPrompt)
 	if err != nil {
 		return "", fmt.Errorf("failed to get completion from LLaMA: %v", err)
 	}
 
-	if strings.TrimSpace(llamaResponse) == "QUERY_BIGIP" {
-		// Query BIG-IP for virtual server information
-		virtualServers, err := p.bigipClient.GetVirtualServers()
-		if err != nil {
-			return "", fmt.Errorf("failed to get virtual servers from BIG-IP: %v", err)
-		}
+	llamaResponse = strings.TrimSpace(llamaResponse)
 
-		// Convert virtual servers to JSON for easier processing by LLaMA
-		vsJSON, err := json.Marshal(virtualServers)
-		if err != nil {
-			return "", fmt.Errorf("failed to marshal virtual servers to JSON: %v", err)
-		}
+	switch llamaResponse {
+	case "QUERY_BIGIP_VS":
+		return p.handleVirtualServerQuery(query)
+	case "QUERY_BIGIP_POOL":
+		return p.handlePoolQuery(query)
+	case "QUERY_BIGIP_POOL_MEMBERS":
+		return p.handlePoolMemberQuery(query)
+	default:
+		return llamaResponse, nil
+	}
+}
 
-		// Ask LLaMA to process the virtual server information and answer the query
-		finalPrompt := fmt.Sprintf("Given the following query and virtual server information from F5 BIG-IP, provide a concise and informative answer. Query: %s\n\nVirtual Server Information: %s", query, string(vsJSON))
-		finalResponse, err := p.llamaClient.GetCompletion(finalPrompt)
-		if err != nil {
-			return "", fmt.Errorf("failed to get final completion from LLaMA: %v", err)
-		}
-
-		return finalResponse, nil
+func (p *Processor) handleVirtualServerQuery(query string) (string, error) {
+	virtualServers, err := p.bigipClient.GetVirtualServers()
+	if err != nil {
+		return "", fmt.Errorf("failed to get virtual servers from BIG-IP: %v", err)
 	}
 
-	// If BIG-IP querying is not required, return the LLaMA response directly
-	return llamaResponse, nil
+	var vsInfo []map[string]interface{}
+	for _, vs := range virtualServers {
+		vsData := map[string]interface{}{
+			"name":        vs.Name,
+			"destination": vs.Destination,
+			"pool":        vs.Pool,
+			"enabled":     vs.Enabled,
+		}
+		vsInfo = append(vsInfo, vsData)
+	}
+
+	vsJSON, err := json.Marshal(vsInfo)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal virtual servers to JSON: %v", err)
+	}
+
+	finalPrompt := fmt.Sprintf("Given the following query and virtual server information from F5 BIG-IP, provide a concise and informative answer. Include relevant details such as names, destinations, associated pools, and enabled status. Query: %s\n\nVirtual Server Information: %s", query, string(vsJSON))
+	finalResponse, err := p.llamaClient.GetCompletion(finalPrompt)
+	if err != nil {
+		return "", fmt.Errorf("failed to get final completion from LLaMA: %v", err)
+	}
+
+	return finalResponse, nil
+}
+
+func (p *Processor) handlePoolQuery(query string) (string, error) {
+	pools, err := p.bigipClient.GetPools()
+	if err != nil {
+		return "", fmt.Errorf("failed to get pools from BIG-IP: %v", err)
+	}
+
+	poolJSON, err := json.Marshal(pools)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal pools to JSON: %v", err)
+	}
+
+	finalPrompt := fmt.Sprintf("Given the following query and pool information from F5 BIG-IP, provide a concise and informative answer. Query: %s\n\nPool Information: %s", query, string(poolJSON))
+	finalResponse, err := p.llamaClient.GetCompletion(finalPrompt)
+	if err != nil {
+		return "", fmt.Errorf("failed to get final completion from LLaMA: %v", err)
+	}
+
+	return finalResponse, nil
+}
+
+func (p *Processor) handlePoolMemberQuery(query string) (string, error) {
+	pools, err := p.bigipClient.GetPools()
+	if err != nil {
+		return "", fmt.Errorf("failed to get pools from BIG-IP: %v", err)
+	}
+
+	var allPoolMembers []map[string]interface{}
+
+	for _, pool := range pools {
+		members, err := p.bigipClient.GetPoolMembers(pool.Name)
+		if err != nil {
+			return "", fmt.Errorf("failed to get pool members for '%s': %v", pool.Name, err)
+		}
+
+		poolInfo := map[string]interface{}{
+			"poolName": pool.Name,
+			"members":  members,
+		}
+		allPoolMembers = append(allPoolMembers, poolInfo)
+	}
+
+	poolMembersJSON, err := json.Marshal(allPoolMembers)
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal pool members to JSON: %v", err)
+	}
+
+	finalPrompt := fmt.Sprintf("Given the following query and pool member information from F5 BIG-IP, provide a concise and informative answer. Query: %s\n\nPool Member Information: %s", query, string(poolMembersJSON))
+	finalResponse, err := p.llamaClient.GetCompletion(finalPrompt)
+	if err != nil {
+		return "", fmt.Errorf("failed to get final completion from LLaMA: %v", err)
+	}
+
+	return finalResponse, nil
 }

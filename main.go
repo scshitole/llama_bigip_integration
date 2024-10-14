@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -12,16 +13,6 @@ import (
 )
 
 func main() {
-	// Check if a query was provided as a command-line argument
-	if len(os.Args) < 2 {
-		fmt.Println("Usage: go run main.go \"<your query>\"")
-		os.Exit(1)
-	}
-
-	// Join all arguments after the program name as the query
-	query := strings.Join(os.Args[1:], " ")
-
-	// Initialize LLaMA client
 	llamaURL := os.Getenv("LLAMA_API_URL")
 	if llamaURL == "" {
 		llamaURL = "http://localhost:5000/generate" // Default URL
@@ -31,26 +22,80 @@ func main() {
 		log.Fatalf("Failed to initialize LLaMA client: %v", err)
 	}
 
-	// Initialize BIG-IP client
+	var bigipClient *bigip.Client
 	bigipHost := os.Getenv("BIGIP_HOST")
 	bigipUsername := os.Getenv("BIGIP_USERNAME")
 	bigipPassword := os.Getenv("BIGIP_PASSWORD")
 	if bigipHost == "" || bigipUsername == "" || bigipPassword == "" {
-		log.Fatalf("BIG-IP environment variables not set. Please set BIGIP_HOST, BIGIP_USERNAME, and BIGIP_PASSWORD")
-	}
-	bigipClient, err := bigip.NewClient(bigipHost, bigipUsername, bigipPassword, false)
-	if err != nil {
-		log.Fatalf("Failed to initialize BIG-IP client: %v", err)
+		bigipClient = bigip.NewMockClient()
+	} else {
+		bigipClient, err = bigip.NewClient(bigipHost, bigipUsername, bigipPassword, false)
+		if err != nil {
+			log.Fatalf("Failed to initialize BIG-IP client: %v", err)
+		}
 	}
 
-	// Initialize query processor
 	queryProcessor := processor.NewProcessor(llamaClient, bigipClient)
 
-	// Process the query
+	if len(os.Args) > 1 {
+		query := strings.Join(os.Args[1:], " ")
+		handleQuery(queryProcessor, bigipClient, query)
+	} else {
+		fmt.Println("Please provide a query as a command-line argument.")
+	}
+}
+
+func handleQuery(queryProcessor *processor.Processor, bigipClient *bigip.Client, query string) {
 	response, err := queryProcessor.ProcessQuery(query)
 	if err != nil {
-		log.Fatalf("Error processing query: %v", err)
+		rawData, err := getRawData(bigipClient, query)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+		} else {
+			fmt.Println(rawData)
+		}
+	} else {
+		fmt.Println(response)
+	}
+}
+
+func getRawData(client *bigip.Client, query string) (string, error) {
+	var data interface{}
+	var err error
+
+	queryLower := strings.ToLower(query)
+	switch {
+	case strings.Contains(queryLower, "virtual server"):
+		data, err = client.GetVirtualServers()
+	case strings.Contains(queryLower, "pool member"):
+		pools, err := client.GetPools()
+		if err != nil {
+			return "", fmt.Errorf("failed to get pools: %v", err)
+		}
+
+		allPoolMembers := make(map[string][]bigip.PoolMember)
+		for _, pool := range pools {
+			members, err := client.GetPoolMembers(pool.Name)
+			if err != nil {
+				return "", fmt.Errorf("failed to get pool members for '%s': %v", pool.Name, err)
+			}
+			allPoolMembers[pool.Name] = members
+		}
+		data = allPoolMembers
+	case strings.Contains(queryLower, "pool"):
+		data, err = client.GetPools()
+	default:
+		return "", fmt.Errorf("unable to determine data type from query")
 	}
 
-	fmt.Println("Response:", response)
+	if err != nil {
+		return "", fmt.Errorf("failed to get data: %v", err)
+	}
+
+	jsonData, err := json.MarshalIndent(data, "", "  ")
+	if err != nil {
+		return "", fmt.Errorf("failed to marshal data to JSON: %v", err)
+	}
+
+	return string(jsonData), nil
 }
